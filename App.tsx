@@ -3,59 +3,68 @@ import {
   StyleSheet,
   View,
   Text,
-  TextInput,
   Pressable,
-  FlatList,
   Alert,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
   Dimensions,
+  ScrollView,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import Svg, { Polyline, Line } from "react-native-svg";
+import Svg, { Polyline, Line, Circle } from "react-native-svg";
+import * as Haptics from "expo-haptics";
 
-// ---------- types & storage ----------
+// ---------- tipos y storage ----------
 type Entry = { dateISO: string; weightKg: number };
 type DataState = { entries: Entry[] };
-const STORAGE_KEY = "weight_checkin_v1";
+const STORAGE_KEY = "weight_checkin_v2";
 
-const todayISO = () => {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const da = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${da}`;
+// ---------- utilidades de fecha ----------
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const toISO = (d: Date) =>
+  `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const fromISO = (iso: string) => {
+  const [y, m, d] = iso.split("-").map((x) => parseInt(x, 10));
+  return new Date(y, m - 1, d);
 };
-const pretty = (iso: string) => {
+const todayISO = () => toISO(new Date());
+const addDaysISO = (iso: string, days: number) => {
+  const d = fromISO(iso);
+  d.setDate(d.getDate() + days);
+  return toISO(d);
+};
+const formatDDMMYYYY = (iso: string) => {
   const [y, m, d] = iso.split("-");
-  return `${d}/${m}`;
+  return `${d}/${m}/${y}`;
 };
 
-// ---------- design tokens ----------
-const TOKENS = {
+// ---------- diseño (tokens) ----------
+const TOK = {
   maxWidth: 420,
   gutter: 20,
-  radiusCard: 16,
-  radiusInput: 12,
+  radius: 18,
   colorBg: "#FFFFFF",
   colorText: "#111111",
   colorMuted: "#6B7280",
   colorLine: "#E5E7EB",
   colorSurface: "#F8FAFC",
   colorPrimary: "#0A84FF",
-  colorPrimaryPressed: "#0A7AF0",
-  colorChart: "#0A84FF",
+  colorDarkBtn: "#1F2937",
+  colorChart: "#FF7A00", // naranja
 };
 
+// ---------- helpers de datos ----------
+const clamp = (v: number, min: number, max: number) =>
+  Math.min(Math.max(v, min), max);
+
 export default function App() {
+  // estado base
   const [loaded, setLoaded] = useState(false);
   const [data, setData] = useState<DataState>({ entries: [] });
-  const [weightInput, setWeightInput] = useState("");
+  const [selectedDateISO, setSelectedDateISO] = useState<string>(todayISO());
+  const [showChart, setShowChart] = useState(false);
 
-  // load
+  // cargar
   useEffect(() => {
     (async () => {
       try {
@@ -66,76 +75,111 @@ export default function App() {
           setData(parsed);
         }
       } catch {
+        // seguimos con vacío
       } finally {
         setLoaded(true);
       }
     })();
   }, []);
 
-  // persist
+  // persistir
   useEffect(() => {
     if (!loaded) return;
     AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(data)).catch(() => {});
   }, [data, loaded]);
 
-  // actions
-  const saveToday = () => {
-    const val = parseFloat(weightInput.replace(",", ".").trim());
-    if (isNaN(val) || val <= 0 || val > 500) {
-      Alert.alert("valor inválido", "ingresa tu peso en kg, por ejemplo 70.5");
-      return;
-    }
-    const iso = todayISO();
+  // derived
+  const isToday = selectedDateISO === todayISO();
+
+  const currentEntry = useMemo(
+    () => data.entries.find((e) => e.dateISO === selectedDateISO),
+    [data.entries, selectedDateISO]
+  );
+
+  const lastKnownWeight = useMemo(() => {
+    // último peso existente (sirve de base si el día no tiene)
+    const arr = data.entries;
+    return arr.length ? arr[arr.length - 1].weightKg : 70;
+  }, [data.entries]);
+
+  const displayWeight = currentEntry?.weightKg ?? lastKnownWeight ?? 70;
+
+  // acciones: navegar días
+  const goPrev = () => setSelectedDateISO((d) => addDaysISO(d, -1));
+  const goNext = () => {
+    if (isToday) return;
+    setSelectedDateISO((d) => {
+      const next = addDaysISO(d, +1);
+      return next > todayISO() ? todayISO() : next;
+    });
+  };
+
+  // acciones: ajustar peso y guardar
+  const saveWeightFor = (dateISO: string, kg: number) => {
+    const val = clamp(Number(kg.toFixed(1)), 20, 300);
     setData((prev) => {
-      const others = prev.entries.filter((e) => e.dateISO !== iso);
+      const others = prev.entries.filter((e) => e.dateISO !== dateISO);
       return {
-        entries: [...others, { dateISO: iso, weightKg: val }]
+        entries: [...others, { dateISO, weightKg: val }]
           .sort((a, b) => (a.dateISO < b.dateISO ? -1 : 1))
-          .slice(-30),
+          .slice(-120), // conserva ~4 meses
       };
     });
-    setWeightInput("");
   };
 
-  const undoLast = () => {
-    setData((prev) => {
-      if (prev.entries.length === 0) return prev;
-      return { entries: prev.entries.slice(0, -1) };
-    });
+  const nudge = (delta: number) => {
+    const base = currentEntry?.weightKg ?? lastKnownWeight ?? 70;
+    const next = clamp(Number((base + delta).toFixed(1)), 20, 300);
+    saveWeightFor(selectedDateISO, next);
+    Haptics.selectionAsync();
   };
 
-  // derived
-  const last7 = useMemo(() => data.entries.slice(-7), [data.entries]);
-  const hasToday = data.entries.some((e) => e.dateISO === todayISO());
-  const latest = data.entries.at(-1)?.weightKg ?? null;
+  // gráfico mejorado con scroll horizontal
+  const chartData = useMemo(() => {
+    const arr = [...data.entries].sort((a, b) =>
+      a.dateISO < b.dateISO ? -1 : 1
+    );
+    return arr;
+  }, [data.entries]);
 
-  // chart
   const chart = useMemo(() => {
-    if (last7.length === 0) return { points: "", min: 0, max: 0, W: 0, H: 0 };
-    const weights = last7.map((e) => e.weightKg);
+    if (chartData.length < 1) return null;
+
+    const screenWidth = Dimensions.get("window").width;
+    const chartWidth = Math.max(
+      screenWidth - TOK.gutter * 2,
+      chartData.length * 60
+    ); // mínimo 60px por punto
+    const H = 180;
+    const pointSpacing = Math.max(60, chartWidth / chartData.length); // mínimo 60px entre puntos
+
+    const weights = chartData.map((e) => e.weightKg);
     const min = Math.min(...weights);
     const max = Math.max(...weights);
-    const pad = max - min < 0.001 ? 0.5 : Math.max(0.3, (max - min) * 0.2);
+    const pad = max - min < 0.001 ? 0.6 : Math.max(0.4, (max - min) * 0.25);
     const minY = min - pad;
     const maxY = max + pad;
-
-    const W = Math.min(
-      TOKENS.maxWidth - TOKENS.gutter * 2,
-      Dimensions.get("window").width - TOKENS.gutter * 2
-    );
-    const H = 120;
-    const stepX = W / Math.max(1, last7.length - 1);
 
     const scaleY = (v: number) => {
       const t = (v - minY) / (maxY - minY);
       return H - t * H;
     };
 
-    const pts = last7
-      .map((e, i) => `${i * stepX},${scaleY(e.weightKg)}`)
+    const points = chartData
+      .map((e, i) => `${i * pointSpacing},${scaleY(e.weightKg)}`)
       .join(" ");
-    return { points: pts, min: minY, max: maxY, W, H };
-  }, [last7]);
+
+    return {
+      W: chartWidth,
+      H,
+      points,
+      scaleY,
+      pointSpacing,
+      minY,
+      maxY,
+      chartData,
+    };
+  }, [chartData]);
 
   if (!loaded) {
     return (
@@ -158,214 +202,348 @@ export default function App() {
     <SafeAreaProvider>
       <SafeAreaView style={styles.screen} edges={["top", "left", "right"]}>
         <StatusBar style="dark" />
-        <KeyboardAvoidingView
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-          style={{ flex: 1 }}
-        >
-          <ScrollView contentContainerStyle={styles.scrollContent}>
-            <View style={styles.container}>
-              {/* header */}
-              <View style={styles.header}>
-                <Text style={styles.title}>check-in de peso</Text>
-                <Text style={styles.subtitle}>{todayISO()}</Text>
-              </View>
 
-              {/* input card */}
-              <View style={styles.card}>
-                <Text style={styles.label}>tu peso de hoy (kg)</Text>
-                <TextInput
-                  placeholder="ej: 70.5"
-                  keyboardType="decimal-pad"
-                  value={weightInput}
-                  onChangeText={setWeightInput}
-                  style={styles.input}
-                  placeholderTextColor={TOKENS.colorMuted}
-                />
-                <Pressable
-                  onPress={saveToday}
-                  style={({ pressed }) => [
-                    styles.primaryBtn,
-                    pressed && { backgroundColor: TOKENS.colorPrimaryPressed },
-                  ]}
+        {/* header: navegación por días */}
+        <View style={[styles.header, styles.rowBetween]}>
+          <Pressable
+            onPress={goPrev}
+            style={({ pressed }) => [
+              styles.navBtn,
+              pressed && { opacity: 0.8 },
+            ]}
+          >
+            <Text style={styles.navGlyph}>{"<"}</Text>
+          </Pressable>
+
+          <View style={{ alignItems: "center" }}>
+            <Text style={styles.todayLabel}>{isToday ? "TODAY" : "DÍA"}</Text>
+            <Text style={styles.dateText}>
+              {formatDDMMYYYY(selectedDateISO)}
+            </Text>
+          </View>
+
+          <Pressable
+            onPress={goNext}
+            disabled={isToday}
+            style={({ pressed }) => [
+              styles.navBtn,
+              isToday && { opacity: 0.3 },
+              pressed && { opacity: 0.8 },
+            ]}
+          >
+            <Text style={styles.navGlyph}>{">"}</Text>
+          </Pressable>
+        </View>
+
+        {/* contenedor principal con número centrado */}
+        <View style={styles.mainContent}>
+          {/* número grande centrado */}
+          <View style={styles.weightBlock}>
+            <Text style={styles.bigNumber}>
+              {displayWeight.toFixed(1).replace(".", ",")}
+            </Text>
+            <Text style={styles.unit}>KG</Text>
+          </View>
+        </View>
+
+        {/* spacer entre número y controles */}
+        <View style={{ height: 16 }} />
+
+        {/* controles +/- */}
+        <View style={styles.controlsContainer}>
+          <Pressable
+            onPress={() => nudge(-0.1)}
+            onLongPress={() => nudge(-0.5)}
+            style={({ pressed }) => [
+              styles.circleBtn,
+              pressed && { transform: [{ scale: 0.98 }] },
+            ]}
+          >
+            <Text style={styles.circleGlyph}>–</Text>
+          </Pressable>
+
+          <Pressable
+            onPress={() => nudge(+0.1)}
+            onLongPress={() => nudge(+0.5)}
+            style={({ pressed }) => [
+              styles.circleBtn,
+              pressed && { transform: [{ scale: 0.98 }] },
+            ]}
+          >
+            <Text style={styles.circleGlyph}>+</Text>
+          </Pressable>
+        </View>
+
+        {/* botón para mostrar/ocultar gráfico */}
+        <View style={styles.chartToggleContainer}>
+          <Pressable
+            onPress={() => setShowChart(!showChart)}
+            style={({ pressed }) => [
+              styles.chartToggleBtn,
+              pressed && { opacity: 0.8 },
+            ]}
+          >
+            <Text style={styles.chartToggleText}>
+              {showChart ? "OCULTAR GRÁFICO" : "MOSTRAR GRÁFICO"}
+            </Text>
+          </Pressable>
+        </View>
+
+        {/* gráfico mejorado con scroll */}
+        {showChart && (
+          <View style={styles.chartCard}>
+            <Text style={styles.chartTitle}>
+              GRÁFICO COMPLETO ({chartData.length} días)
+            </Text>
+
+            {chart && chartData.length >= 1 ? (
+              <View style={styles.chartContainer}>
+                {/* ScrollView horizontal para el gráfico */}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={true}
+                  contentContainerStyle={{ paddingRight: TOK.gutter }}
+                  style={styles.chartScrollView}
                 >
-                  <Text style={styles.primaryBtnText}>
-                    {hasToday ? "actualizar" : "guardar"}
-                  </Text>
-                </Pressable>
-                <Pressable onPress={undoLast} style={styles.linkBtn}>
-                  <Text style={styles.linkText}>deshacer último</Text>
-                </Pressable>
-              </View>
-
-              {/* chart */}
-              <View style={styles.cardPlain}>
-                <Text style={styles.sectionTitle}>últimos 7 días</Text>
-                {last7.length >= 2 ? (
-                  <View style={{ alignItems: "center", marginTop: 10 }}>
+                  <View style={{ width: chart.W }}>
                     <Svg width={chart.W} height={chart.H}>
-                      <Line
-                        x1={0}
-                        x2={chart.W}
-                        y1={chart.H / 2}
-                        y2={chart.H / 2}
-                        stroke={TOKENS.colorLine}
-                        strokeDasharray="4 6"
-                        strokeWidth={1}
-                      />
+                      {/* Grid horizontal */}
+                      {[0.25, 0.5, 0.75].map((t, i) => (
+                        <Line
+                          key={i}
+                          x1={0}
+                          x2={chart.W}
+                          y1={chart.H * (1 - t)}
+                          y2={chart.H * (1 - t)}
+                          stroke={TOK.colorLine}
+                          strokeWidth={1}
+                          opacity={0.5}
+                        />
+                      ))}
+
+                      {/* Línea de tendencia */}
                       <Polyline
                         points={chart.points}
                         fill="none"
-                        stroke={TOKENS.colorChart}
+                        stroke={TOK.colorChart}
                         strokeWidth={3}
                         strokeLinejoin="round"
                         strokeLinecap="round"
                       />
+
+                      {/* Puntos interactivos */}
+                      {chartData.map((e, i) => (
+                        <Circle
+                          key={e.dateISO}
+                          cx={i * chart.pointSpacing}
+                          cy={chart.scaleY(e.weightKg)}
+                          r={6}
+                          fill={TOK.colorChart}
+                          stroke="#FFFFFF"
+                          strokeWidth={2}
+                        />
+                      ))}
                     </Svg>
-                    <View style={styles.graphLabels}>
-                      {last7.map((e, i) => (
-                        <Text key={e.dateISO} style={styles.graphLabelText}>
-                          {i % 2 === 0 ? pretty(e.dateISO) : " "}
-                        </Text>
+
+                    {/* Etiquetas de fechas debajo de cada punto */}
+                    <View style={styles.dateLabelsContainer}>
+                      {chartData.map((e, i) => (
+                        <View
+                          key={e.dateISO}
+                          style={[
+                            styles.dateLabelWrapper,
+                            { left: i * chart.pointSpacing - 25 },
+                          ]}
+                        >
+                          <Text style={styles.dateLabel}>
+                            {formatDDMMYYYY(e.dateISO).slice(0, 5)}
+                          </Text>
+                          <Text style={styles.weightLabel}>
+                            {e.weightKg.toFixed(1)}kg
+                          </Text>
+                        </View>
                       ))}
                     </View>
                   </View>
-                ) : (
-                  <Text style={styles.helper}>
-                    registra al menos 2 días para ver la tendencia
-                  </Text>
-                )}
-              </View>
+                </ScrollView>
 
-              {/* list */}
-              <View style={styles.cardPlain}>
-                <Text style={styles.sectionTitle}>registros</Text>
-                {data.entries.length === 0 ? (
-                  <Text style={styles.helper}>
-                    sin datos aún. guarda tu peso de hoy.
+                {/* Información del rango */}
+                <View style={styles.chartInfo}>
+                  <Text style={styles.chartInfoText}>
+                    Rango: {chart.minY.toFixed(1)}kg - {chart.maxY.toFixed(1)}kg
                   </Text>
-                ) : (
-                  <FlatList
-                    data={[...data.entries].reverse()}
-                    keyExtractor={(item) => item.dateISO}
-                    renderItem={({ item }) => (
-                      <View style={styles.row}>
-                        <Text style={styles.rowDate}>
-                          {pretty(item.dateISO)}
-                        </Text>
-                        <Text style={styles.rowWeight}>
-                          {item.weightKg.toFixed(1)} kg
-                        </Text>
-                      </View>
-                    )}
-                    ItemSeparatorComponent={() => (
-                      <View style={styles.separator} />
-                    )}
-                    scrollEnabled={false} // dejamos que scrollee el padre
-                  />
-                )}
+                </View>
               </View>
-
-              {/* footer */}
-              <View style={{ alignItems: "center", paddingVertical: 8 }}>
-                <Text style={styles.footerText}>
-                  último: {latest ? `${latest.toFixed(1)} kg` : "—"}
-                </Text>
-              </View>
-            </View>
-          </ScrollView>
-        </KeyboardAvoidingView>
+            ) : (
+              <Text style={styles.helper}>
+                registra días para ver la tendencia
+              </Text>
+            )}
+          </View>
+        )}
       </SafeAreaView>
     </SafeAreaProvider>
   );
 }
 
-// ---------- styles ----------
+// ---------- estilos ----------
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: TOKENS.colorBg },
-  scrollContent: { paddingBottom: 24 },
-  container: {
-    width: "100%",
-    maxWidth: TOKENS.maxWidth,
-    alignSelf: "center",
-    paddingHorizontal: TOKENS.gutter,
-    paddingTop: 8,
-  },
-  header: { paddingTop: 4, paddingBottom: 8 },
-  title: { fontSize: 24, fontWeight: "800", color: TOKENS.colorText },
-  subtitle: { fontSize: 13, color: TOKENS.colorMuted, marginTop: 2 },
-
-  // cards
-  card: {
-    backgroundColor: TOKENS.colorSurface,
-    borderRadius: TOKENS.radiusCard,
-    borderWidth: 1,
-    borderColor: TOKENS.colorLine,
-    padding: 16,
-    marginTop: 8,
-    gap: 10,
-  },
-  cardPlain: {
-    backgroundColor: TOKENS.colorBg,
-    borderRadius: TOKENS.radiusCard,
-    borderWidth: 1,
-    borderColor: TOKENS.colorLine,
-    padding: 16,
-    marginTop: 12,
-  },
-
-  label: { fontSize: 14, color: TOKENS.colorText, fontWeight: "600" },
-  input: {
-    backgroundColor: TOKENS.colorBg,
-    borderWidth: 1,
-    borderColor: TOKENS.colorLine,
-    borderRadius: TOKENS.radiusInput,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontSize: 16,
-    color: TOKENS.colorText,
-  },
-
-  primaryBtn: {
-    backgroundColor: TOKENS.colorPrimary,
-    paddingVertical: 14,
-    borderRadius: 12,
+  screen: { flex: 1, backgroundColor: TOK.colorBg },
+  rowBetween: {
+    flexDirection: "row",
+    justifyContent: "space-between",
     alignItems: "center",
-    shadowColor: "#000",
-    shadowOpacity: 0.08,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 6 },
   },
-  primaryBtnText: { color: "#FFFFFF", fontSize: 16, fontWeight: "700" },
-  linkBtn: { alignItems: "center", marginTop: 2 },
-  linkText: { fontSize: 13, color: TOKENS.colorMuted },
 
-  sectionTitle: { fontSize: 16, fontWeight: "700", color: TOKENS.colorText },
-  helper: { fontSize: 13, color: TOKENS.colorMuted, marginTop: 6 },
+  header: { paddingHorizontal: TOK.gutter, paddingTop: 6 },
+  navBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 999,
+    backgroundColor: TOK.colorDarkBtn,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  navGlyph: { color: "#FFFFFF", fontSize: 18, fontWeight: "700" },
 
-  graphLabels: {
+  todayLabel: {
+    fontSize: 16,
+    fontWeight: "800",
+    color: TOK.colorText,
+    letterSpacing: 1,
+  },
+  dateText: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: TOK.colorText,
+    marginTop: 2,
+  },
+
+  mainContent: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingVertical: 40,
+  },
+  weightBlock: {
+    alignItems: "center",
+    justifyContent: "center",
+    flex: 1,
+  },
+  controlsContainer: {
     flexDirection: "row",
     justifyContent: "space-between",
-    width: Math.min(
-      TOKENS.maxWidth - TOKENS.gutter * 2,
-      Dimensions.get("window").width - TOKENS.gutter * 2
-    ),
+    alignItems: "center",
+    paddingHorizontal: TOK.gutter + 8,
+    width: "100%",
+  },
+  bigNumber: {
+    fontSize: 96,
+    fontWeight: "900",
+    color: TOK.colorText,
+    lineHeight: 96,
+  },
+  unit: {
+    fontSize: 28,
+    fontWeight: "900",
+    color: TOK.colorText,
     marginTop: 6,
-  },
-  graphLabelText: { fontSize: 11, color: TOKENS.colorMuted },
-
-  row: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    paddingVertical: 10,
-    paddingHorizontal: 6,
-  },
-  rowDate: { fontSize: 15, color: TOKENS.colorText, fontWeight: "600" },
-  rowWeight: { fontSize: 15, color: TOKENS.colorText },
-  separator: {
-    height: 1,
-    backgroundColor: TOKENS.colorLine,
-    marginHorizontal: 6,
+    letterSpacing: 2,
   },
 
-  footerText: { fontSize: 12, color: TOKENS.colorMuted },
+  circleBtn: {
+    width: 120,
+    height: 120,
+    borderRadius: 999,
+    backgroundColor: TOK.colorDarkBtn,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  circleGlyph: {
+    color: "#FFFFFF",
+    fontSize: 42,
+    fontWeight: "800",
+    lineHeight: 42,
+  },
+
+  chartCard: {
+    marginTop: 16,
+    marginHorizontal: TOK.gutter,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderColor: TOK.colorLine,
+  },
+  chartTitle: {
+    textAlign: "center",
+    fontSize: 16,
+    fontWeight: "700",
+    color: TOK.colorText,
+  },
+  helper: { textAlign: "center", color: TOK.colorMuted, marginTop: 6 },
+  xLabel: { fontSize: 11, color: TOK.colorMuted },
+  title: { fontSize: 18, fontWeight: "600", color: TOK.colorText },
+
+  chartToggleContainer: {
+    alignItems: "center",
+    marginTop: 20,
+    marginHorizontal: TOK.gutter,
+    marginBottom: 24,
+  },
+  chartToggleBtn: {
+    backgroundColor: TOK.colorDarkBtn,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: TOK.radius,
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  chartToggleText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
+
+  // Estilos del gráfico mejorado
+  chartContainer: {
+    marginTop: 8,
+  },
+  chartScrollView: {
+    maxHeight: 220,
+  },
+  dateLabelsContainer: {
+    position: "relative",
+    height: 50,
+    marginTop: 8,
+  },
+  dateLabelWrapper: {
+    position: "absolute",
+    width: 50,
+    alignItems: "center",
+  },
+  dateLabel: {
+    fontSize: 10,
+    color: TOK.colorMuted,
+    fontWeight: "600",
+  },
+  weightLabel: {
+    fontSize: 9,
+    color: TOK.colorText,
+    fontWeight: "700",
+    marginTop: 2,
+  },
+  chartInfo: {
+    alignItems: "center",
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderColor: TOK.colorLine,
+  },
+  chartInfoText: {
+    fontSize: 12,
+    color: TOK.colorMuted,
+    fontWeight: "600",
+  },
 });
