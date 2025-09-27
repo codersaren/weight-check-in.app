@@ -15,6 +15,9 @@ import { StatusBar } from "expo-status-bar";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Svg, { Polyline, Line, Circle } from "react-native-svg";
 import * as Haptics from "expo-haptics";
+import { BackHandler } from "react-native";
+import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from "expo-av";
+import { useAudioPlayer, setAudioModeAsync } from "expo-audio";
 
 // ---------- tipos y storage ----------
 type Entry = { dateISO: string; weightKg: number };
@@ -38,6 +41,11 @@ const addDaysISO = (iso: string, days: number) => {
 const formatDDMMYYYY = (iso: string) => {
   const [y, m, d] = iso.split("-");
   return `${d}/${m}/${y}`;
+};
+
+const formatDDMM = (iso: string) => {
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}`;
 };
 
 // ---------- diseño (tokens) ----------
@@ -69,6 +77,24 @@ export default function App() {
   const [weightInput, setWeightInput] = useState<string>("");
   const [weightDraft, setWeightDraft] = useState<number | null>(null);
 
+  const nf = useMemo(
+    () =>
+      new Intl.NumberFormat("es-ES", {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }),
+    []
+  );
+
+  const HIT = { top: 12, bottom: 12, left: 12, right: 12 };
+  // dentro del componente:
+  const dingRef = useAudioPlayer(require("./assets/sounds/ding.mp3"));
+
+  // AUDIO
+  useEffect(() => {
+    setAudioModeAsync({ playsInSilentMode: true }).catch(() => {});
+  }, []);
+
   // cargar
   useEffect(() => {
     (async () => {
@@ -86,6 +112,13 @@ export default function App() {
       }
     })();
   }, []);
+
+  const playDing = () => {
+    try {
+      dingRef.seekTo(0);
+      dingRef.play();
+    } catch {}
+  };
 
   // persistir
   useEffect(() => {
@@ -113,6 +146,58 @@ export default function App() {
     weightDraft !== null &&
     Number(weightDraft.toFixed(1)) !== Number(savedWeight.toFixed(1));
 
+  // BLOQUEO SWIPE BACK EVITAR
+
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+    const onBack = () => {
+      if (!hasPending) return false;
+      Alert.alert("Cambios sin guardar", "¿Quieres guardar antes de salir?", [
+        {
+          text: "descartar",
+          style: "destructive",
+          onPress: () => BackHandler.exitApp(),
+        },
+        {
+          text: "guardar",
+          onPress: () => {
+            saveWeightFor(selectedDateISO, weightDraft!);
+            BackHandler.exitApp();
+          },
+        },
+        { text: "cancelar", style: "cancel" },
+      ]);
+      return true;
+    };
+    const sub = BackHandler.addEventListener("hardwareBackPress", onBack);
+    return () => sub.remove();
+  }, [hasPending, weightDraft, selectedDateISO]);
+
+  // CONFIRMAR RETROCESO SIN CAMBIOS
+  useEffect(() => {
+    const onBack = () => {
+      if (!hasPending) return false; // deja que el sistema maneje
+      Alert.alert("Cambios sin guardar", "¿Quieres guardar antes de salir?", [
+        {
+          text: "descartar",
+          style: "destructive",
+          onPress: () => BackHandler.exitApp(),
+        },
+        {
+          text: "guardar",
+          onPress: () => {
+            saveWeightFor(selectedDateISO, weightDraft!);
+            BackHandler.exitApp();
+          },
+        },
+        { text: "cancelar", style: "cancel" },
+      ]);
+      return true; // consumimos el back
+    };
+    const sub = BackHandler.addEventListener("hardwareBackPress", onBack);
+    return () => sub.remove();
+  }, [hasPending, weightDraft, selectedDateISO]);
+
   const startEditWeight = () => {
     setWeightInput(displayWeight.toFixed(1).replace(".", ","));
     setIsEditingWeight(true);
@@ -139,6 +224,7 @@ export default function App() {
     saveWeightFor(selectedDateISO, finalVal);
     setWeightDraft(null);
     Haptics.selectionAsync();
+    playDing();
   };
 
   // limpiar estado de edición si cambia el día
@@ -254,6 +340,7 @@ export default function App() {
         {/* header: navegación por días */}
         <View style={[styles.header, styles.rowBetween]}>
           <Pressable
+            hitSlop={HIT}
             onPress={goPrev}
             disabled={!canNavigate}
             style={({ pressed }) => [
@@ -265,14 +352,25 @@ export default function App() {
             <Text style={styles.navGlyph}>{"<"}</Text>
           </Pressable>
 
-          <View style={{ alignItems: "center" }}>
-            <Text style={styles.todayLabel}>{isToday ? "TODAY" : "DÍA"}</Text>
-            <Text style={styles.dateText}>
-              {formatDDMMYYYY(selectedDateISO)}
-            </Text>
+          <View style={{ alignItems: "center", flexDirection: "row", gap: 6 }}>
+            <View style={{ alignItems: "center" }}>
+              <Text style={styles.todayLabel}>{isToday ? "TODAY" : "DÍA"}</Text>
+              <Text style={styles.dateText}>{formatDDMM(selectedDateISO)}</Text>
+            </View>
+            {hasPending && (
+              <View
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: 999,
+                  backgroundColor: "#FF3B30",
+                }}
+              />
+            )}
           </View>
 
           <Pressable
+            hitSlop={HIT}
             onPress={goNext}
             disabled={isToday || !canNavigate}
             style={({ pressed }) => [
@@ -309,7 +407,7 @@ export default function App() {
               />
             ) : (
               <Text style={[styles.bigNumber, hasPending && { opacity: 0.6 }]}>
-                {displayWeight.toFixed(1).replace(".", ",")}
+                {nf.format(displayWeight)}
               </Text>
             )}
             <Text style={styles.unit}>KG</Text>
@@ -322,6 +420,7 @@ export default function App() {
         {/* controles +/- y guardar */}
         <View style={styles.controlsContainer}>
           <Pressable
+            hitSlop={HIT}
             onPress={() => nudge(-0.1)}
             onLongPress={() => nudge(-0.5)}
             style={({ pressed }) => [
@@ -333,6 +432,7 @@ export default function App() {
           </Pressable>
 
           <Pressable
+            hitSlop={HIT}
             onPress={() => nudge(+0.1)}
             onLongPress={() => nudge(+0.5)}
             style={({ pressed }) => [
