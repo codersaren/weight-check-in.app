@@ -3,10 +3,12 @@ import {
   StyleSheet,
   View,
   Text,
+  TextInput,
   Pressable,
   Alert,
   Dimensions,
   ScrollView,
+  Platform,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
@@ -63,6 +65,9 @@ export default function App() {
   const [data, setData] = useState<DataState>({ entries: [] });
   const [selectedDateISO, setSelectedDateISO] = useState<string>(todayISO());
   const [showChart, setShowChart] = useState(false);
+  const [isEditingWeight, setIsEditingWeight] = useState(false);
+  const [weightInput, setWeightInput] = useState<string>("");
+  const [weightDraft, setWeightDraft] = useState<number | null>(null);
 
   // cargar
   useEffect(() => {
@@ -102,12 +107,55 @@ export default function App() {
     return arr.length ? arr[arr.length - 1].weightKg : 70;
   }, [data.entries]);
 
-  const displayWeight = currentEntry?.weightKg ?? lastKnownWeight ?? 70;
+  const savedWeight = currentEntry?.weightKg ?? lastKnownWeight ?? 70;
+  const displayWeight = weightDraft !== null ? weightDraft : savedWeight;
+  const hasPending =
+    weightDraft !== null &&
+    Number(weightDraft.toFixed(1)) !== Number(savedWeight.toFixed(1));
+
+  const startEditWeight = () => {
+    setWeightInput(displayWeight.toFixed(1).replace(".", ","));
+    setIsEditingWeight(true);
+  };
+
+  const commitWeight = () => {
+    const normalized = weightInput
+      .trim()
+      .replace(/[^0-9.,-]/g, "")
+      .replace(",", ".");
+    const parsed = Number(normalized);
+    if (Number.isFinite(parsed)) {
+      const rounded = Number(parsed.toFixed(1));
+      const clamped = clamp(rounded, 20, 300);
+      setWeightDraft(clamped);
+      Haptics.selectionAsync();
+    }
+    setIsEditingWeight(false);
+  };
+
+  const handleSave = () => {
+    if (weightDraft === null) return;
+    const finalVal = clamp(Number(weightDraft.toFixed(1)), 20, 300);
+    saveWeightFor(selectedDateISO, finalVal);
+    setWeightDraft(null);
+    Haptics.selectionAsync();
+  };
+
+  // limpiar estado de edición si cambia el día
+  useEffect(() => {
+    setIsEditingWeight(false);
+    setWeightInput("");
+    setWeightDraft(null);
+  }, [selectedDateISO]);
 
   // acciones: navegar días
-  const goPrev = () => setSelectedDateISO((d) => addDaysISO(d, -1));
+  const canNavigate = !isEditingWeight && !hasPending;
+  const goPrev = () => {
+    if (!canNavigate) return;
+    setSelectedDateISO((d) => addDaysISO(d, -1));
+  };
   const goNext = () => {
-    if (isToday) return;
+    if (!canNavigate || isToday) return;
     setSelectedDateISO((d) => {
       const next = addDaysISO(d, +1);
       return next > todayISO() ? todayISO() : next;
@@ -128,9 +176,9 @@ export default function App() {
   };
 
   const nudge = (delta: number) => {
-    const base = currentEntry?.weightKg ?? lastKnownWeight ?? 70;
+    const base = weightDraft !== null ? weightDraft : savedWeight;
     const next = clamp(Number((base + delta).toFixed(1)), 20, 300);
-    saveWeightFor(selectedDateISO, next);
+    setWeightDraft(next);
     Haptics.selectionAsync();
   };
 
@@ -207,9 +255,11 @@ export default function App() {
         <View style={[styles.header, styles.rowBetween]}>
           <Pressable
             onPress={goPrev}
+            disabled={!canNavigate}
             style={({ pressed }) => [
               styles.navBtn,
-              pressed && { opacity: 0.8 },
+              (!canNavigate || pressed) && { opacity: 0.8 },
+              !canNavigate && styles.navDisabled,
             ]}
           >
             <Text style={styles.navGlyph}>{"<"}</Text>
@@ -224,10 +274,10 @@ export default function App() {
 
           <Pressable
             onPress={goNext}
-            disabled={isToday}
+            disabled={isToday || !canNavigate}
             style={({ pressed }) => [
               styles.navBtn,
-              isToday && { opacity: 0.3 },
+              (isToday || !canNavigate) && { opacity: 0.3 },
               pressed && { opacity: 0.8 },
             ]}
           >
@@ -238,18 +288,38 @@ export default function App() {
         {/* contenedor principal con número centrado */}
         <View style={styles.mainContent}>
           {/* número grande centrado */}
-          <View style={styles.weightBlock}>
-            <Text style={styles.bigNumber}>
-              {displayWeight.toFixed(1).replace(".", ",")}
-            </Text>
+          <Pressable
+            style={styles.weightBlock}
+            onPress={!isEditingWeight ? startEditWeight : undefined}
+          >
+            {isEditingWeight ? (
+              <TextInput
+                style={[styles.bigNumber, styles.bigNumberInput]}
+                value={weightInput}
+                onChangeText={(t) => setWeightInput(t)}
+                autoFocus
+                keyboardType={Platform.OS === "ios" ? "decimal-pad" : "numeric"}
+                returnKeyType="done"
+                onSubmitEditing={commitWeight}
+                onBlur={commitWeight}
+                maxLength={7}
+                placeholder="0,0"
+                selectionColor={TOK.colorPrimary}
+                underlineColorAndroid="transparent"
+              />
+            ) : (
+              <Text style={[styles.bigNumber, hasPending && { opacity: 0.6 }]}>
+                {displayWeight.toFixed(1).replace(".", ",")}
+              </Text>
+            )}
             <Text style={styles.unit}>KG</Text>
-          </View>
+          </Pressable>
         </View>
 
         {/* spacer entre número y controles */}
         <View style={{ height: 16 }} />
 
-        {/* controles +/- */}
+        {/* controles +/- y guardar */}
         <View style={styles.controlsContainer}>
           <Pressable
             onPress={() => nudge(-0.1)}
@@ -271,6 +341,23 @@ export default function App() {
             ]}
           >
             <Text style={styles.circleGlyph}>+</Text>
+          </Pressable>
+        </View>
+
+        {/* botón guardar cambios */}
+        <View style={styles.saveContainer}>
+          <Pressable
+            onPress={handleSave}
+            disabled={!hasPending}
+            style={({ pressed }) => [
+              styles.saveBtn,
+              (!hasPending || pressed) && { opacity: 0.8 },
+              !hasPending && { backgroundColor: "#9CA3AF" },
+            ]}
+          >
+            <Text style={styles.saveText}>
+              {hasPending ? "GUARDAR CAMBIOS" : "PESO ACTUALIZADO"}
+            </Text>
           </Pressable>
         </View>
 
@@ -405,6 +492,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   navGlyph: { color: "#FFFFFF", fontSize: 18, fontWeight: "700" },
+  navDisabled: { opacity: 0.3 },
 
   todayLabel: {
     fontSize: 16,
@@ -441,7 +529,14 @@ const styles = StyleSheet.create({
     fontSize: 96,
     fontWeight: "900",
     color: TOK.colorText,
-    lineHeight: 96,
+    lineHeight: 104,
+  },
+  bigNumberInput: {
+    textAlign: "center",
+    paddingTop: 6,
+    paddingBottom: 2,
+    includeFontPadding: false,
+    textAlignVertical: "center",
   },
   unit: {
     fontSize: 28,
@@ -464,6 +559,24 @@ const styles = StyleSheet.create({
     fontSize: 42,
     fontWeight: "800",
     lineHeight: 42,
+  },
+
+  saveContainer: {
+    alignItems: "center",
+    marginTop: 20,
+    marginHorizontal: TOK.gutter,
+  },
+  saveBtn: {
+    backgroundColor: "#10B981", // verde éxito
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: TOK.radius,
+  },
+  saveText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "800",
+    letterSpacing: 1,
   },
 
   chartCard: {

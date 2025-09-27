@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "weight-check-in.app",
-    "slug": "weight-check-in.app",
+    "slug": "weight-check-in-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -16,12 +16,15 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.santi.weightcheckin",
+      "versionCode": 1,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": []
     },
     "web": {
       "favicon": "./assets/favicon.png"
