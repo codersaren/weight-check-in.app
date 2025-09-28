@@ -140,11 +140,12 @@ export default function App() {
     return arr.length ? arr[arr.length - 1].weightKg : 70;
   }, [data.entries]);
 
-  const savedWeight = currentEntry?.weightKg ?? lastKnownWeight ?? 70;
+  const savedWeight = currentEntry?.weightKg ?? null;
   const displayWeight = weightDraft !== null ? weightDraft : savedWeight;
   const hasPending =
     weightDraft !== null &&
-    Number(weightDraft.toFixed(1)) !== Number(savedWeight.toFixed(1));
+    (savedWeight === null ||
+      Number(weightDraft.toFixed(1)) !== Number(savedWeight.toFixed(1)));
 
   // BLOQUEO SWIPE BACK EVITAR
 
@@ -199,7 +200,10 @@ export default function App() {
   }, [hasPending, weightDraft, selectedDateISO]);
 
   const startEditWeight = () => {
-    setWeightInput(displayWeight.toFixed(1).replace(".", ","));
+    const prefillNumber = weightDraft !== null ? weightDraft : savedWeight;
+    setWeightInput(
+      prefillNumber !== null ? prefillNumber.toFixed(1).replace(".", ",") : ""
+    );
     setIsEditingWeight(true);
   };
 
@@ -262,7 +266,8 @@ export default function App() {
   };
 
   const nudge = (delta: number) => {
-    const base = weightDraft !== null ? weightDraft : savedWeight;
+    const base =
+      weightDraft !== null ? weightDraft : savedWeight ?? lastKnownWeight;
     const next = clamp(Number((base + delta).toFixed(1)), 20, 300);
     setWeightDraft(next);
     Haptics.selectionAsync();
@@ -407,7 +412,7 @@ export default function App() {
               />
             ) : (
               <Text style={[styles.bigNumber, hasPending && { opacity: 0.6 }]}>
-                {nf.format(displayWeight)}
+                {displayWeight === null ? "--" : nf.format(displayWeight)}
               </Text>
             )}
             <Text style={styles.unit}>KG</Text>
@@ -700,7 +705,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginTop: 20,
     marginHorizontal: TOK.gutter,
-    marginBottom: 24,
+    marginBottom: 52,
   },
   chartToggleBtn: {
     backgroundColor: TOK.colorDarkBtn,
